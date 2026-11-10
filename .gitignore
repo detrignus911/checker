@@ -23,6 +23,8 @@ results.txt
 *.txt
 !README.md
 !LICENSE
+# Разрешаем все Python файлы (исходный код)
+!*.py
 
 # Экспортные файлы
 domain_export_*/
