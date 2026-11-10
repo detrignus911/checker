@@ -1,4 +1,4 @@
-﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿using System;
+﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
@@ -2270,12 +2270,20 @@ private async Task TestAllProxies()
             if (File.Exists(contactsFile))
                 File.Delete(contactsFile);
             
+            // Создаем пустой файл, чтобы он гарантированно существовал
+            File.Create(contactsFile).Dispose();
+            
             // Запускаем сбор контактов
             await CollectAllContactsRealTime();
             
             isScanning = false;
             Console.WriteLine("\n✅ Сбор контактов завершен!");
-            Console.WriteLine($"Всего извлечено уникальных контактов: {File.ReadAllLines(contactsFile).Length}");
+            // Гарантируем что файл существует перед чтением
+            if (!File.Exists(contactsFile))
+                File.Create(contactsFile).Dispose();
+                
+            var allLines = File.ReadAllLines(contactsFile).Where(l => !string.IsNullOrWhiteSpace(l)).Count();
+            Console.WriteLine($"Всего извлечено уникальных контактов: {allLines}");
             Console.WriteLine("Нажмите любую клавишу для возврата в меню...");
             Console.ReadKey();
         }
@@ -2345,11 +2353,31 @@ private async Task TestAllProxies()
                             if (proxyStr != null && proxyStr.StartsWith("socks5://"))
                             {
                                 var cleanProxy = proxyStr.Replace("socks5://", "");
-                                var proxyParts = cleanProxy.Split(':');
-                                if (proxyParts.Length >= 2 && int.TryParse(proxyParts[1], out int proxyPort))
+                                string proxyHost;
+                                int proxyPort;
+                                
+                                // Обрабатываем формат с аутентификацией: user:pass@host:port
+                                if (cleanProxy.Contains('@'))
                                 {
-                                    var proxy = new MailKit.Net.Proxy.Socks5Client(proxyParts[0], proxyPort);
-                                    client.ProxyClient = proxy;
+                                    var atParts = cleanProxy.Split('@');
+                                    var hostPortPart = atParts[atParts.Length - 1];
+                                    var hostPortParts = hostPortPart.Split(':');
+                                    if (hostPortParts.Length >= 2 && int.TryParse(hostPortParts[1], out proxyPort))
+                                    {
+                                        proxyHost = hostPortParts[0];
+                                        var proxy = new MailKit.Net.Proxy.Socks5Client(proxyHost, proxyPort);
+                                        client.ProxyClient = proxy;
+                                    }
+                                }
+                                else
+                                {
+                                    // Обычный формат: host:port
+                                    var proxyParts = cleanProxy.Split(':');
+                                    if (proxyParts.Length >= 2 && int.TryParse(proxyParts[1], out proxyPort))
+                                    {
+                                        var proxy = new MailKit.Net.Proxy.Socks5Client(proxyParts[0], proxyPort);
+                                        client.ProxyClient = proxy;
+                                    }
                                 }
                             }
                             
@@ -3015,14 +3043,31 @@ class ProxyManager
     }
 
     public async Task<bool> TestProxyAsync(string proxy, TimeSpan timeout)
-    {
-        try
         {
-            var proxyParts = proxy.Replace("socks5://", "").Split(':');
-            if (proxyParts.Length < 2) return false;
-
-            string host = proxyParts[0];
-            int port = int.Parse(proxyParts[1]);
+            try
+            {
+                var cleanProxy = proxy.Replace("socks5://", "");
+                string host;
+                int port;
+                
+                // Обрабатываем формат с аутентификацией: user:pass@host:port
+                if (cleanProxy.Contains('@'))
+                {
+                    var atParts = cleanProxy.Split('@');
+                    var hostPortPart = atParts[atParts.Length - 1]; // Берем часть после последнего @
+                    var hostPortParts = hostPortPart.Split(':');
+                    if (hostPortParts.Length < 2) return false;
+                    host = hostPortParts[0];
+                    port = int.Parse(hostPortParts[1]);
+                }
+                else
+                {
+                    // Обычный формат: host:port
+                    var proxyParts = cleanProxy.Split(':');
+                    if (proxyParts.Length < 2) return false;
+                    host = proxyParts[0];
+                    port = int.Parse(proxyParts[1]);
+                }
 
             using var cts = new CancellationTokenSource(timeout);
             using var client = new TcpClient();
@@ -3346,11 +3391,31 @@ class ProxyManager
                    if (!string.IsNullOrEmpty(s.proxy) && s.proxy.StartsWith("socks5://"))
                     {
                         var cleanProxy = s.proxy.Replace("socks5://", "");
-                        var proxyParts = cleanProxy.Split(':');
-                        if (proxyParts.Length >= 2 && int.TryParse(proxyParts[1], out int port))
+                        string proxyHost;
+                        int proxyPort;
+                        
+                        // Обрабатываем формат с аутентификацией: user:pass@host:port
+                        if (cleanProxy.Contains('@'))
                         {
-                            var proxy = new MailKit.Net.Proxy.Socks5Client(proxyParts[0], port);
-                            client.ProxyClient = proxy;
+                            var atParts = cleanProxy.Split('@');
+                            var hostPortPart = atParts[atParts.Length - 1];
+                            var hostPortParts = hostPortPart.Split(':');
+                            if (hostPortParts.Length >= 2 && int.TryParse(hostPortParts[1], out proxyPort))
+                            {
+                                proxyHost = hostPortParts[0];
+                                var proxy = new MailKit.Net.Proxy.Socks5Client(proxyHost, proxyPort);
+                                client.ProxyClient = proxy;
+                            }
+                        }
+                        else
+                        {
+                            // Обычный формат: host:port
+                            var proxyParts = cleanProxy.Split(':');
+                            if (proxyParts.Length >= 2 && int.TryParse(proxyParts[1], out proxyPort))
+                            {
+                                var proxy = new MailKit.Net.Proxy.Socks5Client(proxyParts[0], proxyPort);
+                                client.ProxyClient = proxy;
+                            }
                         }
                     }
                     var connectTask = client.ConnectAsync(s.server, s.port, s.ssl ? SecureSocketOptions.SslOnConnect : SecureSocketOptions.StartTlsWhenAvailable);
