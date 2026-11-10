@@ -1,4 +1,4 @@
-﻿﻿﻿﻿﻿﻿using System;
+﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
@@ -39,17 +39,18 @@ namespace opentask
         private int maxThreads = 200;
         private int connectTimeout = 10;
         private bool proxyEnabled = false;
-        private ProxyManager proxyManager;
+        private ProxyManager? proxyManager;
         
-        // улучшеный функционал
+        // Новые поля для улучшенного функционала
         private bool isScanning = false;
         private int totalAccounts = 0;
         private int processedAccounts = 0;
         private int validAccounts = 0;
         private int foundMessages = 0;
         private DateTime scanStartTime;
+
         private ConcurrentBag<string> realTimeResults = new ConcurrentBag<string>();
-        private CancellationTokenSource cancellationTokenSource;
+        private CancellationTokenSource? cancellationTokenSource;
         private object consoleLock = new object();
 
         public async Task Run()
@@ -75,7 +76,7 @@ namespace opentask
                 "📊 Просмотреть результаты",
                 "💾 Экспорт результатов",
                 "🔄 Обновить прокси",
-                "👀 Просмотреть ва аккаунты",
+                "👀 Просмотреть валид аккаунты",
                 "❌ Выход"
             };
             
@@ -139,7 +140,7 @@ namespace opentask
             Console.ResetColor();
         }
 
-        private async Task ShowSettingsMenu()
+        private Task ShowSettingsMenu()
         {
             var settings = new[]
             {
@@ -208,11 +209,11 @@ namespace opentask
                             }
                             break;
                         case 6:
-                            return;
+                            return Task.CompletedTask;
                     }
                 }
                 else if (key.Key == ConsoleKey.Escape)
-                    return;
+                    return Task.CompletedTask;
             }
         }
 
@@ -244,7 +245,7 @@ namespace opentask
             while (isScanning)
             {
                 Console.Clear();
-                DrawHeader("📊 СКАНИРОВАНИЕ В ПРОЦЕССЕ", "Реал-тайм статистика", 80);
+                DrawHeader("📊 СКАНИРОВАНИЕ В ПРОЦЕССЕ", "репчик грязный", 80);
                 
                 var progress = totalAccounts > 0 ? (double)processedAccounts / totalAccounts * 100 : 0;
                 var elapsed = DateTime.Now - scanStartTime;
@@ -516,7 +517,7 @@ namespace opentask
             }
         }
 
-        private async Task ShowQuickSettings()
+        private Task ShowQuickSettings()
         {
             Console.Clear();
             DrawHeader("⚡ БЫСТРЫЕ НАСТРОЙКИ", "Изменение параметров во время сканирования", 80);
@@ -572,6 +573,7 @@ namespace opentask
             
             Console.WriteLine("\nНажмите любую клавишу для возврата...");
             Console.ReadKey();
+            return Task.CompletedTask;
         }
 
         private string ExtractErrorType(string errorLine)
@@ -754,7 +756,7 @@ namespace opentask
             Console.WriteLine($"📂 Все файлы сохранены в папку {exportDir}");
         }
 
-        private async Task UpdateProxies()
+        private Task UpdateProxies()
         {
             Console.Clear();
             DrawHeader("🔄 ОБНОВЛЕНИЕ ПРОКСИ", "Загрузка новых прокси", 80);
@@ -767,6 +769,53 @@ namespace opentask
             
             Console.WriteLine("\nНажмите любую клавишу для возврата...");
             Console.ReadKey();
+            return Task.CompletedTask;
+        }
+
+        private Task ShowWorkingAccountsQuick()
+        {
+            Console.Clear();
+            DrawHeader("👀 СПИСОК ВОРКИНГ АККАУНТОВ", "Рабочие почтовые аккаунты", 80);
+
+            if (!File.Exists(workingFile))
+            {
+                Console.WriteLine("❌ Файл с рабочими аккаунтами не найден!");
+                Console.WriteLine("\nНажмите любую клавишу для возврата...");
+                Console.ReadKey();
+                return Task.CompletedTask;
+            }
+
+            var workingAccounts = File.ReadAllLines(workingFile).Where(l => !string.IsNullOrWhiteSpace(l)).ToList();
+            
+            if (workingAccounts.Count == 0)
+            {
+                Console.WriteLine("ℹ️ В файле нет рабочих аккаунтов");
+                Console.WriteLine("\nНажмите любую клавишу для возврата...");
+                Console.ReadKey();
+                return Task.CompletedTask;
+            }
+
+            Console.WriteLine($"✅ Всего рабочих аккаунтов: {workingAccounts.Count}\n");
+            
+            // Показываем первые 50 аккаунтов, чтобы не перегружать консоль
+            var toShow = workingAccounts.Take(50).ToList();
+            foreach (var line in toShow)
+            {
+                var parts = line.Split(new[] { ':', ';' }, 2);
+                if (parts.Length >= 1)
+                {
+                    Console.WriteLine($"📧 {parts[0]}");
+                }
+            }
+
+            if (workingAccounts.Count > 50)
+            {
+                Console.WriteLine($"\n... и еще {workingAccounts.Count - 50} аккаунтов. Всего сохранено в {workingFile}");
+            }
+
+            Console.WriteLine("\nНажмите любую клавишу для возврата в меню...");
+            Console.ReadKey();
+            return Task.CompletedTask;
         }
 
         private void DrawHeader(string title, string subtitle, int width)
@@ -811,7 +860,7 @@ namespace opentask
             {
                 Console.WriteLine($"[DEBUG] Обнаружен t-online домен: {domain} для {email}");
                 
-                var tOnlineAttempts = new List<(string server, int port, bool ssl, string proxy)>
+                var tOnlineAttempts = new List<(string server, int port, bool ssl, string? proxy)>
                 {
                     ("secureimap.t-online.de", 993, true, proxy),
                     ("imap.t-online.de", 993, true, proxy),
@@ -834,7 +883,7 @@ namespace opentask
                 var maxTimeout = TimeSpan.FromSeconds(30);
                 
                 // Дополнительные попытки для t-online с различными настройками
-                var extendedAttempts = new List<(string server, int port, bool ssl, string proxy)>(serverAttempts);
+                var extendedAttempts = new List<(string server, int port, bool ssl, string? proxy)>(serverAttempts);
                 
                 // Добавляем альтернативные серверы для t-online
                 if (domain == "t-online.de" || domain == "t-online.com" || domain == "t-online.at")
@@ -1898,7 +1947,7 @@ namespace opentask
                 {
                     try
                     {
-                        var attemptList = new List<(string server, int port, bool ssl, string proxy)> { attempt };
+                        var attemptList = new List<(string server, int port, bool ssl, string? proxy)> { attempt };
                         result = await ImapHelper.TryConnectAsync(email, password, attemptList, maxTimeout, proxy);
                         Console.WriteLine($"[DEBUG] Попытка {attempt.server}:{attempt.port} для {email}: {result.Success} - {result.Message}");
                         if (result.Success) return result;
@@ -2375,46 +2424,7 @@ namespace opentask
             catch { return false; }
         }
 
-        private async Task ShowWorkingAccountsQuick()
-        {
-            Console.Clear();
-            UI.WriteLine("📋 ВОРКИНГ АККАУНТЫ (НАЙДЕННЫЕ С ПИСЬМАМИ)", ConsoleColor.Cyan);
-            UI.WriteLine("", ConsoleColor.DarkGray);
-            
-            if (!File.Exists(workingFile))
-            {
-                UI.WriteLine("Файл working_accounts.txt не найден.", ConsoleColor.Yellow);
-                UI.WaitKey("Нажмите любую клавишу для возврата в главное меню...");
-                return;
-            }
-            
-            var workingAccounts = File.ReadAllLines(workingFile)
-                .Where(line => !string.IsNullOrWhiteSpace(line))
-                .Select(line => line.Trim())
-                .ToList();
-                
-            if (workingAccounts.Count == 0)
-            {
-                UI.WriteLine("Нет воркинг аккаунтов.", ConsoleColor.Yellow);
-            }
-            else
-            {
-                UI.WriteLine($"Всего воркинг аккаунтов: {workingAccounts.Count}", ConsoleColor.Green);
-                UI.WriteLine("", ConsoleColor.DarkGray);
-                
-                for (int i = 0; i < workingAccounts.Count; i++)
-                {
-                    var parts = workingAccounts[i].Split(new[] { ':', ';' }, 5);
-                    var email = parts.ElementAtOrDefault(0) ?? "unknown";
-                    var server = parts.ElementAtOrDefault(2) ?? "unknown";
-                    var port = parts.ElementAtOrDefault(3) ?? "unknown";
-                    UI.WriteLine($"{i + 1}. {email} ({server}:{port})", ConsoleColor.White);
-                }
-            }
-            
-            UI.WriteLine("", ConsoleColor.DarkGray);
-            UI.WaitKey("Нажмите любую клавишу для возврата в главное меню...");
-        }
+
     }
 
     static class UI
@@ -2739,9 +2749,9 @@ namespace opentask
             { "inbox.ru", ("imap.mail.ru", 993, true) },
         };
 
-        public static async Task<List<(string server, int port, bool ssl, string proxy)>> GetFullServerAttemptsAsync(string domain, string email, string proxy)
+        public static async Task<List<(string server, int port, bool ssl, string? proxy)>> GetFullServerAttemptsAsync(string domain, string email, string? proxy)
         {
-            var attempts = new List<(string, int, bool, string)>();
+            var attempts = new List<(string, int, bool, string?)>();
             var dict = GetImapDictionary();
             if (dict.ContainsKey(domain))
             {
@@ -2808,7 +2818,7 @@ namespace opentask
             return null;
         }
 
-        public static async Task<(bool Success, string Message, ImapClient Client, string UsedServer, int UsedPort, bool UsedSsl)> TryConnectAsync(string email, string password, List<(string server, int port, bool ssl, string proxy)> attempts, TimeSpan connectTimeout, string proxyStr)
+        public static async Task<(bool Success, string Message, ImapClient? Client, string UsedServer, int UsedPort, bool UsedSsl)> TryConnectAsync(string email, string password, List<(string server, int port, bool ssl, string? proxy)> attempts, TimeSpan connectTimeout, string? proxyStr)
         {
             foreach (var s in attempts)
             {
