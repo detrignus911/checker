@@ -1,0 +1,29 @@
+# .NET файлы
+bin/
+obj/
+*.pdb
+*.exe
+*.dll
+*.deps.json
+*.runtimeconfig.json
+
+# Временные файлы и логи
+.DS_Store
+.history/
+.vscode/
+*.backup
+
+# Файлы с данными (секретные, не добавляем в репозиторий)
+accounts.txt
+proxies.txt
+senders.txt
+working_accounts.txt
+errors.txt
+results.txt
+*.txt
+!README.md
+!LICENSE
+
+# Экспортные файлы
+domain_export_*/
+working_accounts_*.txt
