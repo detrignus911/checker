@@ -1,4 +1,4 @@
-﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿using System;
+﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿﻿using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
@@ -2326,93 +2326,89 @@ private async Task TestAllProxies()
                 tasks.Add(Task.Run(async () =>
                 {
                     await throttler.WaitAsync();
+                    string? proxyStr = proxyEnabled && proxyManager != null ? proxyManager.GetNextProxy() : null;
+                    // Используем уже работающий метод для подключения (как в основной проверке)
+                    var domain = acc.Email.Split('@')[1];
+                    var attempts = ImapHelper.GetImapDictionary();
+                    if (!attempts.ContainsKey(domain))
+                    {
+                        lock (printLock) { accountResults[accIndex] = $"❌ {acc.Email}: домен не поддерживается"; colorResults[accIndex] = ConsoleColor.Red; }
+                        Interlocked.Increment(ref processedAccounts);
+                        throttler.Release();
+                        return;
+                    }
+                    var imapSettings = attempts[domain];
+                    string server = imapSettings.Item1;
+                    int port = imapSettings.Item2;
+                    bool ssl = imapSettings.Item3;
+                    
+                    using var client = new ImapClient();
+                    client.ServerCertificateValidationCallback = (s, c, h, e) => true;
+                    
                     try
                     {
-                        string? proxyStr = proxyEnabled && proxyManager != null ? proxyManager.GetNextProxy() : null;
-                        // Используем уже работающий метод для подключения (как в основной проверке)
-                        var domain = acc.Email.Split('@')[1];
-                        var attempts = ImapHelper.GetImapDictionary();
-                        if (!attempts.ContainsKey(domain))
-                        {
-                            lock (printLock) { accountResults[accIndex] = $"❌ {acc.Email}: домен не поддерживается"; colorResults[accIndex] = ConsoleColor.Red; }
-                            return;
-                        }
-                        var imapSettings = attempts[domain];
-                        string server = imapSettings.Item1;
-                        int port = imapSettings.Item2;
-                        bool ssl = imapSettings.Item3;
+                        var socketOptions = ssl ? SecureSocketOptions.SslOnConnect : SecureSocketOptions.StartTls;
                         
-                        using var client = new ImapClient();
-                        client.ServerCertificateValidationCallback = (s, c, h, e) => true;
-                        
-                        try
+                        // Используем тот же способ подключения через прокси, что и в основной проверке
+                        if (proxyStr != null && proxyStr.StartsWith("socks5://"))
                         {
-                            var socketOptions = ssl ? SecureSocketOptions.SslOnConnect : SecureSocketOptions.StartTls;
+                            var cleanProxy = proxyStr.Replace("socks5://", "");
+                            string proxyHost;
+                            int proxyPort;
                             
-                            // Используем тот же способ подключения через прокси, что и в основной проверке
-                            if (proxyStr != null && proxyStr.StartsWith("socks5://"))
+                            // Обрабатываем формат с аутентификацией: user:pass@host:port
+                            if (cleanProxy.Contains('@'))
                             {
-                                var cleanProxy = proxyStr.Replace("socks5://", "");
-                                string proxyHost;
-                                int proxyPort;
-                                
-                                // Обрабатываем формат с аутентификацией: user:pass@host:port
-                                if (cleanProxy.Contains('@'))
+                                var atParts = cleanProxy.Split('@');
+                                var hostPortPart = atParts[atParts.Length - 1];
+                                var hostPortParts = hostPortPart.Split(':');
+                                if (hostPortParts.Length >= 2 && int.TryParse(hostPortParts[1], out proxyPort))
                                 {
-                                    var atParts = cleanProxy.Split('@');
-                                    var hostPortPart = atParts[atParts.Length - 1];
-                                    var hostPortParts = hostPortPart.Split(':');
-                                    if (hostPortParts.Length >= 2 && int.TryParse(hostPortParts[1], out proxyPort))
-                                    {
-                                        proxyHost = hostPortParts[0];
-                                        var proxy = new MailKit.Net.Proxy.Socks5Client(proxyHost, proxyPort);
-                                        client.ProxyClient = proxy;
-                                    }
-                                }
-                                else
-                                {
-                                    // Обычный формат: host:port
-                                    var proxyParts = cleanProxy.Split(':');
-                                    if (proxyParts.Length >= 2 && int.TryParse(proxyParts[1], out proxyPort))
-                                    {
-                                        var proxy = new MailKit.Net.Proxy.Socks5Client(proxyParts[0], proxyPort);
-                                        client.ProxyClient = proxy;
-                                    }
+                                    proxyHost = hostPortParts[0];
+                                    var proxy = new MailKit.Net.Proxy.Socks5Client(proxyHost, proxyPort);
+                                    client.ProxyClient = proxy;
                                 }
                             }
-                            
-                            // Подключаемся без лишних параметров
-                            await client.ConnectAsync(server, port, socketOptions);
-
-                            // Извлекаем все контакты из всех доступных папок
-                            var contacts = await ExtractAllContactsFromMailbox(client);
-                            foreach (var contact in contacts)
+                            else
                             {
-                                if (allContacts.Add(contact))
+                                // Обычный формат: host:port
+                                var proxyParts = cleanProxy.Split(':');
+                                if (proxyParts.Length >= 2 && int.TryParse(proxyParts[1], out proxyPort))
                                 {
-                                    lock (_contactsFileLock)
-                                    {
-                                        File.AppendAllText(contactsFile, $"{contact}{Environment.NewLine}");
-                                    }
+                                    var proxy = new MailKit.Net.Proxy.Socks5Client(proxyParts[0], proxyPort);
+                                    client.ProxyClient = proxy;
                                 }
                             }
+                        }
+                        
+                        // Подключаемся без лишних параметров
+                        await client.ConnectAsync(server, port, socketOptions);
 
-                            Interlocked.Increment(ref validAccounts);
-                            lock (printLock) { accountResults[accIndex] = $"✅ {acc.Email}: извлечено {contacts.Count} контактов"; colorResults[accIndex] = ConsoleColor.Green; }
-                        }
-                        catch (Exception ex)
+                        // Извлекаем все контакты из всех доступных папок
+                        var contacts = await ExtractAllContactsFromMailbox(client);
+                        foreach (var contact in contacts)
                         {
-                            lock (printLock) { accountResults[accIndex] = $"❌ {acc.Email}: {ex.Message.Substring(0, Math.Min(ex.Message.Length, 50))}"; colorResults[accIndex] = ConsoleColor.Red; }
-                            errors.Add($"{acc.Email}: {ex.Message}");
+                            if (allContacts.Add(contact))
+                            {
+                                lock (_contactsFileLock)
+                                {
+                                    File.AppendAllText(contactsFile, $"{contact}{Environment.NewLine}");
+                                }
+                            }
                         }
-                        finally
-                        {
-                            if (client.IsConnected)
-                                await client.DisconnectAsync(true);
-                        }
+
+                        Interlocked.Increment(ref validAccounts);
+                        lock (printLock) { accountResults[accIndex] = $"✅ {acc.Email}: извлечено {contacts.Count} контактов"; colorResults[accIndex] = ConsoleColor.Green; }
+                    }
+                    catch (Exception ex)
+                    {
+                        lock (printLock) { accountResults[accIndex] = $"❌ {acc.Email}: {ex.Message.Substring(0, Math.Min(ex.Message.Length, 50))}"; colorResults[accIndex] = ConsoleColor.Red; }
+                        errors.Add($"{acc.Email}: {ex.Message}");
                     }
                     finally
                     {
+                        if (client.IsConnected)
+                            await client.DisconnectAsync(true);
                         Interlocked.Increment(ref processedAccounts);
                         throttler.Release();
                     }
